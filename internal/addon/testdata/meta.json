@@ -1,0 +1,13 @@
+{
+  "meta": {
+    "id": "tt0944947",
+    "type": "series",
+    "name": "Game of Thrones",
+    "description": "Nine noble families fight for control.",
+    "releaseInfo": "2011-2019",
+    "imdbRating": "9.2",
+    "videos": [
+      {"id": "tt0944947:1:1", "title": "Winter Is Coming", "season": 1, "episode": 1, "released": "2011-04-17"}
+    ]
+  }
+}

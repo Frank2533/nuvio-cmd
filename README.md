@@ -4,7 +4,10 @@ An unofficial, cross-platform (Windows/macOS/Linux) terminal client for browsing
 playing media through Stremio-protocol addons — inspired by, but not affiliated with,
 [NuvioDesktop](https://github.com/NuvioMedia/NuvioDesktop).
 
-Status: **M0 scaffold**. See the plan for milestones and architecture.
+Status: **M1** — browse Stremio-protocol addon catalogs, view details, and play
+direct-URL streams through mpv. Addon management (add/list) is in. Debrid, P2P
+streaming, tracking sync, downloads, and library are later milestones. See the
+plan for the full milestone list and architecture rationale.
 
 ## Run from source
 
@@ -13,17 +16,32 @@ go run ./cmd/nuvio
 ```
 
 Requires Go 1.24+, and `mpv` installed on your system for playback (not bundled).
+On first run it seeds the addon list with the official Cinemeta catalog addon;
+add stream-capable addons from the Addons screen (`a`) to actually play something
+— Cinemeta itself only serves catalog/meta, not streams.
 
 ## Architecture
 
 - `cmd/nuvio` — entrypoint
-- `internal/tui` — Bubble Tea screens
-- `internal/addon` — Stremio-protocol addon client
-- `internal/tmdb`, `internal/tracking` — metadata and Trakt/Simkl/MDBList sync
-- `internal/debrid` — Real-Debrid/AllDebrid/Premiumize/TorBox clients
-- `internal/p2p` — torrent streaming
-- `internal/player` — mpv process + JSON IPC control
-- `internal/library`, `internal/downloads` — local state
+- `internal/tui` — Bubble Tea screens (menu, addons, browse, details, streams, player)
+- `internal/addon` — Stremio-protocol addon client (manifest/catalog/meta/stream)
+- `internal/config` — on-disk addon list persistence
+- `internal/player` — mpv process + JSON IPC control (Unix socket / Windows named pipe)
+- `internal/tmdb`, `internal/tracking` — metadata and Trakt/Simkl/MDBList sync (not yet implemented)
+- `internal/debrid` — Real-Debrid/AllDebrid/Premiumize/TorBox clients (not yet implemented)
+- `internal/p2p` — torrent streaming (not yet implemented)
+- `internal/library`, `internal/downloads` — local state (not yet implemented)
+
+## Testing
+
+`go test ./...` runs the committed suite (protocol-shape tests for `addon`
+using recorded fixtures, a fake-IPC-server test for `player`, config
+round-trip tests) — no network or mpv required, safe for CI.
+
+Files tagged `manual` (`go test -tags manual -run TestLive... ./...`) are
+live, network/mpv-dependent smoke tests against the real Cinemeta addon and a
+real mpv process. They're excluded from the default build and CI, and are
+meant to be run by hand when verifying a milestone end-to-end.
 
 ## Status of parity with NuvioDesktop
 

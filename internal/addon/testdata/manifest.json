@@ -1,0 +1,30 @@
+{
+  "id": "com.linvo.cinemeta",
+  "version": "3.0.14",
+  "description": "The official addon for movie and series catalogs",
+  "name": "Cinemeta",
+  "resources": ["catalog", "meta"],
+  "types": ["movie", "series"],
+  "idPrefixes": ["tt"],
+  "catalogs": [
+    {
+      "type": "movie",
+      "id": "top",
+      "name": "Popular",
+      "genres": ["Action", "Comedy"],
+      "extra": [
+        {"name": "genre", "options": ["Action", "Comedy"]},
+        {"name": "search"},
+        {"name": "skip"}
+      ],
+      "extraSupported": ["search", "genre", "skip"]
+    },
+    {
+      "type": "series",
+      "id": "legacy",
+      "name": "Legacy Extra Shape",
+      "extraSupported": ["search", "skip"],
+      "extraRequired": ["search"]
+    }
+  ]
+}
