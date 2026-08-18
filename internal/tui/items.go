@@ -6,6 +6,7 @@ import (
 
 	"nuvio-cmd/internal/addon"
 	"nuvio-cmd/internal/config"
+	"nuvio-cmd/internal/debrid"
 )
 
 // addonState pairs a configured addon with its fetched manifest (or the
@@ -91,6 +92,24 @@ func (i episodeItem) Title() string {
 
 func (i episodeItem) Description() string { return i.video.Released }
 func (i episodeItem) FilterValue() string { return i.Title() }
+
+// debridProviderItem is one of the fixed set of known debrid providers,
+// paired with its configured entry (nil if not yet set up).
+type debridProviderItem struct {
+	id    string
+	entry *config.DebridEntry
+}
+
+func (i debridProviderItem) Title() string { return debrid.DisplayName(i.id) }
+
+func (i debridProviderItem) Description() string {
+	if i.entry != nil && i.entry.Token != "" {
+		return "configured"
+	}
+	return "not configured"
+}
+
+func (i debridProviderItem) FilterValue() string { return i.Title() }
 
 type streamItem struct{ stream addon.Stream }
 

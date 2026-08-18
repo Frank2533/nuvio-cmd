@@ -15,6 +15,7 @@ import (
 
 	"nuvio-cmd/internal/addon"
 	"nuvio-cmd/internal/config"
+	"nuvio-cmd/internal/debrid"
 	"nuvio-cmd/internal/player"
 )
 
@@ -24,6 +25,8 @@ const (
 	screenMenu screen = iota
 	screenAddons
 	screenAddAddon
+	screenDebrid
+	screenDebridToken
 	screenBrowseCatalogs
 	screenBrowseItems
 	screenDetails
@@ -70,16 +73,22 @@ type Model struct {
 
 	menu    list.Model
 	addons  list.Model
+	debrid  list.Model
 	catalog list.Model
 	items   list.Model
 	episode list.Model
 	streams list.Model
 
-	addAddonInput textinput.Model
-	spinner       spinner.Model
-	loading       bool
+	addAddonInput    textinput.Model
+	debridTokenInput textinput.Model
+	spinner          spinner.Model
+	loading          bool
 
 	addonStates []addonState
+
+	debridEntries         []config.DebridEntry
+	debridManager         *debrid.Manager
+	debridEditingProvider string
 
 	// Navigation context for the currently selected chain
 	activeCatalog  catalogItem
@@ -114,11 +123,18 @@ func NewModel() Model {
 	menu.SetItems([]list.Item{
 		menuEntry{title: "Browse", desc: "Browse catalogs from installed addons"},
 		menuEntry{title: "Addons", desc: "Manage installed Stremio-protocol addons"},
+		menuEntry{title: "Debrid", desc: "Configure debrid providers for instant-cache streaming"},
 	})
 
 	ti := textinput.New()
 	ti.Placeholder = "https://example.com/manifest.json"
 	ti.CharLimit = 256
+
+	dti := textinput.New()
+	dti.Placeholder = "API token"
+	dti.CharLimit = 256
+	dti.EchoMode = textinput.EchoPassword
+	dti.EchoCharacter = '•'
 
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
@@ -128,26 +144,29 @@ func NewModel() Model {
 		client:  addon.NewClient(),
 		menu:    menu,
 		addons:  newList("Addons"),
+		debrid:  newList("Debrid providers"),
 		catalog: newList("Browse"),
 		items:   newList("Catalog"),
 		episode: newList("Episodes"),
 		streams: newList("Streams"),
 
-		addAddonInput: ti,
-		spinner:       sp,
-		loading:       true,
-		statusMsg:     "unofficial · unaffiliated with NuvioMedia",
+		addAddonInput:    ti,
+		debridTokenInput: dti,
+		spinner:          sp,
+		loading:          true,
+		debridManager:    debrid.NewManager(),
+		statusMsg:        "unofficial · unaffiliated with NuvioMedia",
 	}
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.spinner.Tick, loadAddonsCmd(m.client))
+	return tea.Batch(m.spinner.Tick, loadAddonsCmd(m.client), loadDebridCmd())
 }
 
 func (m *Model) setSize(w, h int) {
 	m.width, m.height = w, h
 	listH := h - 4
-	for _, l := range []*list.Model{&m.menu, &m.addons, &m.catalog, &m.items, &m.episode, &m.streams} {
+	for _, l := range []*list.Model{&m.menu, &m.addons, &m.debrid, &m.catalog, &m.items, &m.episode, &m.streams} {
 		l.SetSize(w, listH)
 	}
 }
@@ -177,6 +196,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshAddonsList()
 		m.refreshCatalogsList()
 		return m, nil
+
+	case debridLoadedMsg:
+		m.debridEntries = msg.entries
+		m.debridManager = buildDebridManager(msg.entries)
+		m.refreshDebridList()
+		return m, nil
+
+	case debridSavedMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.errMsg = msg.err.Error()
+			return m, nil
+		}
+		m.errMsg = ""
+		m.debridEntries = msg.entries
+		m.debridManager = buildDebridManager(msg.entries)
+		m.refreshDebridList()
+		m.screen = screenDebrid
+		return m, nil
+
+	case debridResolvedMsg:
+		if msg.err != nil {
+			m.loading = false
+			m.errMsg = "debrid: " + msg.err.Error()
+			return m, nil
+		}
+		m.loading = true
+		m.playerTitle = msg.file.Name
+		if m.playerTitle == "" {
+			m.playerTitle = msg.title
+		}
+		return m, startPlayerCmd(msg.file.URL, m.playerTitle)
 
 	case addonAddedMsg:
 		m.loading = false
@@ -278,6 +329,38 @@ func (m *Model) refreshAddonsList() {
 	m.addons.SetItems(items)
 }
 
+func (m *Model) refreshDebridList() {
+	items := make([]list.Item, 0, len(debrid.KnownProviders()))
+	for _, id := range debrid.KnownProviders() {
+		item := debridProviderItem{id: id}
+		for _, e := range m.debridEntries {
+			if e.Provider == id {
+				item.entry = &e
+				break
+			}
+		}
+		items = append(items, item)
+	}
+	m.debrid.SetItems(items)
+}
+
+// buildDebridManager constructs the set of active Provider clients from
+// persisted config, skipping disabled or blank-token entries.
+func buildDebridManager(entries []config.DebridEntry) *debrid.Manager {
+	var providers []debrid.Provider
+	for _, e := range entries {
+		if !e.Enabled || e.Token == "" {
+			continue
+		}
+		p, err := debrid.New(e.Provider, e.Token)
+		if err != nil {
+			continue
+		}
+		providers = append(providers, p)
+	}
+	return debrid.NewManager(providers...)
+}
+
 // streamCapableAddons returns the manifests of enabled addons that both
 // declare the "stream" resource and support typ — the set fetchStreamsCmd
 // should query for a given movie/series.
@@ -335,6 +418,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			case "Addons":
 				m.screen = screenAddons
 				return m, nil
+			case "Debrid":
+				m.screen = screenDebrid
+				return m, nil
 			}
 		}
 		var cmd tea.Cmd
@@ -376,6 +462,58 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		var cmd tea.Cmd
 		m.addAddonInput, cmd = m.addAddonInput.Update(msg)
+		return m, cmd
+
+	case screenDebrid:
+		switch key {
+		case "esc", "q":
+			m.screen = screenMenu
+			return m, nil
+		case "enter":
+			if pi, ok := m.debrid.SelectedItem().(debridProviderItem); ok {
+				m.debridEditingProvider = pi.id
+				existing := ""
+				if pi.entry != nil {
+					existing = pi.entry.Token
+				}
+				m.debridTokenInput.SetValue(existing)
+				m.debridTokenInput.Focus()
+				m.screen = screenDebridToken
+				return m, textinput.Blink
+			}
+		}
+		var cmd tea.Cmd
+		m.debrid, cmd = m.debrid.Update(msg)
+		return m, cmd
+
+	case screenDebridToken:
+		switch key {
+		case "esc":
+			m.screen = screenDebrid
+			return m, nil
+		case "enter":
+			token := strings.TrimSpace(m.debridTokenInput.Value())
+			updated := make([]config.DebridEntry, 0, len(m.debridEntries)+1)
+			found := false
+			for _, e := range m.debridEntries {
+				if e.Provider == m.debridEditingProvider {
+					found = true
+					if token != "" {
+						updated = append(updated, config.DebridEntry{Provider: e.Provider, Token: token, Enabled: true})
+					}
+					continue
+				}
+				updated = append(updated, e)
+			}
+			if !found && token != "" {
+				updated = append(updated, config.DebridEntry{Provider: m.debridEditingProvider, Token: token, Enabled: true})
+			}
+			m.loading = true
+			m.errMsg = ""
+			return m, saveDebridCmd(updated)
+		}
+		var cmd tea.Cmd
+		m.debridTokenInput, cmd = m.debridTokenInput.Update(msg)
 		return m, cmd
 
 	case screenBrowseCatalogs:
@@ -456,14 +594,23 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "enter":
 			if si, ok := m.streams.SelectedItem().(streamItem); ok {
-				if !si.stream.Playable() {
-					m.errMsg = "this stream needs P2P/torrent streaming, which isn't implemented yet"
+				if si.stream.Playable() {
+					m.loading = true
+					m.errMsg = ""
+					m.playerTitle = si.stream.DisplayTitle()
+					return m, startPlayerCmd(si.stream.URL, m.playerTitle)
+				}
+				if si.stream.InfoHash != "" && !m.debridManager.Empty() {
+					m.loading = true
+					m.errMsg = ""
+					return m, resolveDebridCmd(m.debridManager, si.stream)
+				}
+				if si.stream.InfoHash != "" {
+					m.errMsg = "this stream needs a debrid provider (add one under Debrid) or P2P streaming, which isn't implemented yet"
 					return m, nil
 				}
-				m.loading = true
-				m.errMsg = ""
-				m.playerTitle = si.stream.DisplayTitle()
-				return m, startPlayerCmd(si.stream.URL, m.playerTitle)
+				m.errMsg = "this stream has no playable source"
+				return m, nil
 			}
 		}
 		var cmd tea.Cmd
@@ -511,6 +658,13 @@ func (m Model) View() string {
 			bodyStyle.Render("Manifest URL:") + "\n" +
 			bodyStyle.Render(m.addAddonInput.View()) +
 			hintStyle.Render("enter: add · esc: cancel")
+	case screenDebrid:
+		body = m.debrid.View() + hintStyle.Render("enter: set token · esc: back")
+	case screenDebridToken:
+		body = headerStyle.Render("Debrid: "+debrid.DisplayName(m.debridEditingProvider)) + "\n" +
+			bodyStyle.Render("API token:") + "\n" +
+			bodyStyle.Render(m.debridTokenInput.View()) +
+			hintStyle.Render("enter: save (blank clears it) · esc: cancel")
 	case screenBrowseCatalogs:
 		body = m.catalog.View() + hintStyle.Render("enter: open catalog · esc: back")
 	case screenBrowseItems:

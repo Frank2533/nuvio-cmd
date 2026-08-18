@@ -9,6 +9,7 @@ import (
 
 	"nuvio-cmd/internal/addon"
 	"nuvio-cmd/internal/config"
+	"nuvio-cmd/internal/debrid"
 	"nuvio-cmd/internal/player"
 )
 
@@ -31,6 +32,19 @@ type streamsLoadedMsg struct {
 
 type addonAddedMsg struct {
 	state addonState
+}
+
+type debridLoadedMsg struct{ entries []config.DebridEntry }
+
+type debridSavedMsg struct {
+	entries []config.DebridEntry
+	err     error
+}
+
+type debridResolvedMsg struct {
+	file  debrid.ResolvedFile
+	title string
+	err   error
 }
 
 type playerStartedMsg struct {
@@ -131,6 +145,34 @@ func fetchStreamsCmd(client *addon.Client, manifests []*addon.Manifest, typ, id 
 			return streamsLoadedMsg{nil, lastErr}
 		}
 		return streamsLoadedMsg{all, nil}
+	}
+}
+
+func loadDebridCmd() tea.Cmd {
+	return func() tea.Msg {
+		entries, err := config.LoadDebrid()
+		if err != nil {
+			return errMsg{err}
+		}
+		return debridLoadedMsg{entries}
+	}
+}
+
+func saveDebridCmd(entries []config.DebridEntry) tea.Cmd {
+	return func() tea.Msg {
+		err := config.SaveDebrid(entries)
+		return debridSavedMsg{entries, err}
+	}
+}
+
+// resolveDebridCmd resolves an infoHash-only stream through the configured
+// debrid providers, in priority order, into a directly playable URL.
+func resolveDebridCmd(manager *debrid.Manager, stream addon.Stream) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		defer cancel()
+		file, _, err := manager.Resolve(ctx, stream.InfoHash, stream.FileIdx)
+		return debridResolvedMsg{file: file, title: stream.DisplayTitle(), err: err}
 	}
 }
 
