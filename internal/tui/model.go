@@ -16,6 +16,7 @@ import (
 	"nuvio-cmd/internal/addon"
 	"nuvio-cmd/internal/config"
 	"nuvio-cmd/internal/debrid"
+	"nuvio-cmd/internal/p2p"
 	"nuvio-cmd/internal/player"
 )
 
@@ -27,6 +28,7 @@ const (
 	screenAddAddon
 	screenDebrid
 	screenDebridToken
+	screenP2PConsent
 	screenBrowseCatalogs
 	screenBrowseItems
 	screenDetails
@@ -89,6 +91,11 @@ type Model struct {
 	debridEntries         []config.DebridEntry
 	debridManager         *debrid.Manager
 	debridEditingProvider string
+
+	pendingStream   addon.Stream
+	p2pConsentGiven bool
+	p2pEngine       *p2p.Engine
+	p2pStream       *p2p.Stream
 
 	// Navigation context for the currently selected chain
 	activeCatalog  catalogItem
@@ -160,7 +167,23 @@ func NewModel() Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.spinner.Tick, loadAddonsCmd(m.client), loadDebridCmd())
+	return tea.Batch(m.spinner.Tick, loadAddonsCmd(m.client), loadDebridCmd(), loadP2PConsentCmd())
+}
+
+// Cleanup releases resources that outlive a single Update cycle: any
+// running mpv process, the active P2P stream (if any), and the P2P engine's
+// torrent client and listening sockets. Call once after the Bubble Tea
+// program exits.
+func (m Model) Cleanup() {
+	if m.player != nil {
+		m.player.Stop()
+	}
+	if m.p2pStream != nil {
+		m.p2pStream.Close()
+	}
+	if m.p2pEngine != nil {
+		m.p2pEngine.Close()
+	}
 }
 
 func (m *Model) setSize(w, h int) {
@@ -218,9 +241,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case debridResolvedMsg:
 		if msg.err != nil {
-			m.loading = false
-			m.errMsg = "debrid: " + msg.err.Error()
-			return m, nil
+			// Fall through to P2P instead of a dead end: no debrid provider
+			// had this cached, but the stream's infoHash is still usable.
+			m.errMsg = ""
+			return m, m.enterP2PFlow()
 		}
 		m.loading = true
 		m.playerTitle = msg.file.Name
@@ -228,6 +252,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.playerTitle = msg.title
 		}
 		return m, startPlayerCmd(msg.file.URL, m.playerTitle)
+
+	case p2pConsentLoadedMsg:
+		m.p2pConsentGiven = msg.given
+		return m, nil
+
+	case p2pStreamOpenedMsg:
+		if msg.engine != nil {
+			m.p2pEngine = msg.engine
+		}
+		if msg.err != nil {
+			m.loading = false
+			m.errMsg = "p2p: " + msg.err.Error()
+			m.screen = screenStreams
+			return m, nil
+		}
+		m.p2pStream = msg.stream
+		m.loading = true
+		m.playerTitle = msg.stream.Name
+		return m, startPlayerCmd(msg.stream.URL, m.playerTitle)
 
 	case addonAddedMsg:
 		m.loading = false
@@ -311,6 +354,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.player = nil
+		if m.p2pStream != nil {
+			m.p2pStream.Close()
+			m.p2pStream = nil
+		}
 		m.screen = screenStreams
 		return m, nil
 
@@ -359,6 +406,20 @@ func buildDebridManager(entries []config.DebridEntry) *debrid.Manager {
 		providers = append(providers, p)
 	}
 	return debrid.NewManager(providers...)
+}
+
+// enterP2PFlow routes to the consent screen the first time, or straight to
+// opening a P2P stream once the user has already agreed.
+func (m *Model) enterP2PFlow() tea.Cmd {
+	if m.p2pConsentGiven {
+		m.loading = true
+		m.errMsg = ""
+		return openP2PStreamCmd(m.p2pEngine, m.pendingStream)
+	}
+	m.loading = false
+	m.errMsg = ""
+	m.screen = screenP2PConsent
+	return nil
 }
 
 // streamCapableAddons returns the manifests of enabled addons that both
@@ -600,22 +661,35 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					m.playerTitle = si.stream.DisplayTitle()
 					return m, startPlayerCmd(si.stream.URL, m.playerTitle)
 				}
-				if si.stream.InfoHash != "" && !m.debridManager.Empty() {
+				if si.stream.InfoHash == "" {
+					m.errMsg = "this stream has no playable source"
+					return m, nil
+				}
+				m.pendingStream = si.stream
+				if !m.debridManager.Empty() {
 					m.loading = true
 					m.errMsg = ""
 					return m, resolveDebridCmd(m.debridManager, si.stream)
 				}
-				if si.stream.InfoHash != "" {
-					m.errMsg = "this stream needs a debrid provider (add one under Debrid) or P2P streaming, which isn't implemented yet"
-					return m, nil
-				}
-				m.errMsg = "this stream has no playable source"
-				return m, nil
+				return m, m.enterP2PFlow()
 			}
 		}
 		var cmd tea.Cmd
 		m.streams, cmd = m.streams.Update(msg)
 		return m, cmd
+
+	case screenP2PConsent:
+		switch key {
+		case "n", "esc":
+			m.screen = screenStreams
+			return m, nil
+		case "y", "enter":
+			m.p2pConsentGiven = true
+			m.loading = true
+			m.errMsg = ""
+			return m, tea.Batch(saveP2PConsentCmd(true), openP2PStreamCmd(m.p2pEngine, m.pendingStream))
+		}
+		return m, nil
 
 	case screenPlayer:
 		switch key {
@@ -623,6 +697,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.player != nil {
 				p := m.player
 				m.player = nil
+				if m.p2pStream != nil {
+					m.p2pStream.Close()
+					m.p2pStream = nil
+				}
 				m.screen = screenStreams
 				return m, stopPlayerCmd(p)
 			}
@@ -675,6 +753,8 @@ func (m Model) View() string {
 		body = m.episode.View() + hintStyle.Render("enter: streams · esc: back")
 	case screenStreams:
 		body = m.streams.View() + hintStyle.Render("enter: play · esc: back")
+	case screenP2PConsent:
+		body = m.p2pConsentView()
 	case screenPlayer:
 		body = m.playerView()
 	}
@@ -687,6 +767,25 @@ func (m Model) View() string {
 	}
 
 	return fmt.Sprintf("%s\n%s", body, statusStyle.Render(m.statusMsg))
+}
+
+func (m Model) p2pConsentView() string {
+	var b strings.Builder
+	b.WriteString(headerStyle.Render("P2P Streaming"))
+	b.WriteString("\n")
+	b.WriteString(bodyStyle.Render("No debrid provider had this cached, but the stream is available directly over BitTorrent. Before continuing:"))
+	b.WriteString("\n")
+	for _, line := range []string{
+		"• Other peers in the swarm will see your IP address",
+		"• You're responsible for confirming this is legal to stream in your jurisdiction",
+		"• Nuvio CMD doesn't host, index, or control any P2P content — it only connects to a swarm",
+		"• This choice is remembered until you clear ~/.config/nuvio-cmd/p2p.json",
+	} {
+		b.WriteString(bodyStyle.Render(line))
+		b.WriteString("\n")
+	}
+	b.WriteString(hintStyle.Render("y/enter: enable P2P and continue · n/esc: cancel"))
+	return b.String()
 }
 
 func (m Model) detailsView() string {

@@ -13,7 +13,11 @@ import (
 
 func main() {
 	p := tea.NewProgram(tui.NewModel(), tea.WithAltScreen())
-	if _, err := p.Run(); err != nil {
+	finalModel, err := p.Run()
+	if m, ok := finalModel.(tui.Model); ok {
+		m.Cleanup()
+	}
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "nuvio: fatal:", err)
 		os.Exit(1)
 	}

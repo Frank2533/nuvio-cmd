@@ -10,6 +10,7 @@ import (
 	"nuvio-cmd/internal/addon"
 	"nuvio-cmd/internal/config"
 	"nuvio-cmd/internal/debrid"
+	"nuvio-cmd/internal/p2p"
 	"nuvio-cmd/internal/player"
 )
 
@@ -45,6 +46,14 @@ type debridResolvedMsg struct {
 	file  debrid.ResolvedFile
 	title string
 	err   error
+}
+
+type p2pConsentLoadedMsg struct{ given bool }
+
+type p2pStreamOpenedMsg struct {
+	engine *p2p.Engine
+	stream *p2p.Stream
+	err    error
 }
 
 type playerStartedMsg struct {
@@ -173,6 +182,45 @@ func resolveDebridCmd(manager *debrid.Manager, stream addon.Stream) tea.Cmd {
 		defer cancel()
 		file, _, err := manager.Resolve(ctx, stream.InfoHash, stream.FileIdx)
 		return debridResolvedMsg{file: file, title: stream.DisplayTitle(), err: err}
+	}
+}
+
+func loadP2PConsentCmd() tea.Cmd {
+	return func() tea.Msg {
+		given, err := config.LoadP2PConsent()
+		if err != nil {
+			return errMsg{err}
+		}
+		return p2pConsentLoadedMsg{given}
+	}
+}
+
+func saveP2PConsentCmd(given bool) tea.Cmd {
+	return func() tea.Msg {
+		_ = config.SaveP2PConsent(given) // best-effort: worst case, we ask again next session
+		return nil
+	}
+}
+
+// openP2PStreamCmd lazily creates the P2P engine on first use (starting a
+// torrent.Client opens listening sockets and begins DHT bootstrap, which
+// shouldn't happen for users who never touch this feature), then opens
+// stream for playback. The engine is always returned, even on failure, so
+// the caller can keep reusing it rather than leaking a new Client per
+// attempt.
+func openP2PStreamCmd(engine *p2p.Engine, stream addon.Stream) tea.Cmd {
+	return func() tea.Msg {
+		var err error
+		if engine == nil {
+			engine, err = p2p.NewEngine()
+			if err != nil {
+				return p2pStreamOpenedMsg{err: err}
+			}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		s, err := engine.Open(ctx, stream.InfoHash, stream.FileIdx)
+		return p2pStreamOpenedMsg{engine: engine, stream: s, err: err}
 	}
 }
 
